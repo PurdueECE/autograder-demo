@@ -1,0 +1,151 @@
+name: grader all
+on:
+  workflow_call:
+    inputs:
+      # repo filtering
+      created_after:
+        required: true
+        type: string
+      created_before:
+        required: true
+        type: string
+      pattern:
+        required: false
+        type: string
+        default: ^assmt-.*$
+      # commit filtering
+      due_date:
+        required: true
+        type: string
+      # submission formatting
+      submission_dir:
+        required: false
+        type: string
+        default: '.'
+      ignored_files:
+        required: false
+        type: string
+        default: null
+      # grader behavior
+      fallback:
+        required: true
+        type: string
+      tests:
+        required: true
+        type: string
+      config:
+        required: false
+        type: string
+        default: 'config.json'
+    secrets:
+      PAT:
+
+jobs:
+  # Collect all repos that match the pattern and were created between the given dates
+  repos:
+    runs-on: ubuntu-latest
+    outputs:
+      repos: ${{ steps.find_repos.outputs.repos }}
+    steps:
+      - id: find_repos
+        uses: PurdueECE/action-find-repos@v3
+        with:
+          pattern: ${{ inputs.pattern }}
+          after: ${{ inputs.created_after }}
+          before: ${{ inputs.created_before }}
+          token: ${{ secrets.PAT }}
+  # Matrix job to run on each found repo
+  grader:
+    needs: repos
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        # Populate the matrix with the list of repos
+        repo: ${{ fromJson(needs.repos.outputs.repos) }}
+    steps:
+      # Format the repo name to be used as a directory name
+      - name: get repo name
+        id: repo_name
+        run: echo "REPO_NAME=$(echo ${{ matrix.repo }} | tr '/' '_')" >> $GITHUB_OUTPUT
+      - name: checkout grader
+        uses: actions/checkout@v3
+      - name: find submission commit
+        id: find
+        continue-on-error: true
+        uses: PurdueECE/action-find-commit@v3
+        with:
+          repository: ${{ matrix.repo }}
+          before: ${{ inputs.due_date }}
+          token: ${{ secrets.PAT }}
+      - name: checkout submission
+        id: submission
+        continue-on-error: true
+        if: ${{ steps.find.outcome == 'success' }}
+        uses: actions/checkout@v3
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ steps.find.outputs.commit }}
+          token: ${{ secrets.PAT }}
+          path: ${{ steps.repo_name.outputs.REPO_NAME }}
+      - name: get assignment path
+        id: path
+        run: echo "PATH=${{ steps.repo_name.outputs.REPO_NAME }}/${{ inputs.submission_dir }}" >> $GITHUB_OUTPUT
+      - name: format submission
+        run: |
+          if ! mkdir -p ${{ steps.path.outputs.PATH }}; then
+              rm -rf ${{ steps.path.outputs.PATH }}
+              mkdir ${{ steps.path.outputs.PATH }}
+          fi
+      - name: setup python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.9
+      - name: install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: grade submission
+        continue-on-error: true
+        shell: bash
+        run: |
+          python -m grader \
+          ${{ steps.path.outputs.PATH }} \
+          --config ${{ inputs.config }} \
+          --fallback ${{ inputs.fallback }} \
+          --submission ${{ matrix.repo }} \
+          --tests ${{ inputs.tests }} \
+          --output ${{ steps.path.outputs.PATH }}/scores.csv \
+          --log ${{ steps.path.outputs.PATH }}/grader.log
+      - name: format output
+        run: rm -rf ${{ inputs.ignored_files }}
+        working-directory: ${{ steps.path.outputs.PATH }}
+      - name: upload results
+        uses: actions/upload-artifact@v3
+        with:
+          name: results
+          # Upload .github so that entire PATH folder is uploaded
+          path: |
+            ${{ steps.path.outputs.PATH }}
+            .github
+  # Merge CSV results from matrix job
+  results:
+    needs: [grader]
+    runs-on: ubuntu-latest
+    steps:
+      - name: download results
+        uses: actions/download-artifact@v3
+        with:
+          name: results
+      - name: merge results
+        run: |
+          ls
+          rm -rf .github
+          awk 'FNR==1 && NR!=1{next;}{print}' */*/scores.csv > scores.csv
+      - name: re-upload results
+        uses: actions/upload-artifact@v3
+        with:
+          name: results
+          path: ./

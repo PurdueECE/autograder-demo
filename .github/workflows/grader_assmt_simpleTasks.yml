@@ -1,0 +1,16 @@
+name: Simple Tasks Grader Workflow
+on:
+  workflow_dispatch:
+
+jobs:
+  grader:
+    uses: ./.github/workflows/grader_all.yml
+    with:
+      created_after: '2023-01-01T00:00:00-05:00'
+      created_before: '2023-01-30T00:00:00-05:00'
+      due_date: '2023-01-15T23:59:59-05:00'
+      fallback: assmt_simpleTasks/template
+      tests: assmt_simpleTasks/tests
+      config: assmt_simpleTasks/tests/config.json
+    secrets:
+      PAT: ${{ secrets.PAT }}
